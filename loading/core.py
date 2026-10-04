@@ -1,6 +1,11 @@
 """加载进度聚合：按资源权重汇总已完成进度，重复上报不重复计入、进度单调不减。
 
-缺陷：重复上报重复累加、空权重表返回 0、未知资源按权重 1 计入、每次查询全扫权重表。
+口径（以 README 为准）：
+- 加权进度：已完成资源的权重和除以总权重和；总权重和不为正时按 1 处理。
+- 上报幂等：同一资源重复上报不重复计入。
+- 忽略未知：权重表里没有的资源上报一律忽略。
+- 单调不减：进度只增不减，永远落在 0 到 1 之间。
+- 查询代价：增量维护已完成权重和，上报与查询单次摊还 O(1)，不做全表扫描。
 """
 
 
@@ -9,25 +14,32 @@ class Loading:
 
     def __init__(self, weights):
         self.weights = dict(weights)
-        self.reported = {}
+        self.reported = set()
         self.scanned = 0
+        self._total = sum(self.weights.values())
+        self._done = 0
+        self._max_progress = 0.0
 
     def report(self, asset_id):
-        """上报一个资源加载完成。缺陷：同一条重复上报也累加计数。"""
-        self.reported[asset_id] = self.reported.get(asset_id, 0) + 1
+        """上报一个资源加载完成。未知资源忽略，重复上报幂等。"""
+        if asset_id not in self.weights or asset_id in self.reported:
+            return
+        self.reported.add(asset_id)
+        self._done += self.weights[asset_id]
 
     def progress(self):
-        """当前进度。缺陷：空权重表返回 0、未知资源按 1 计、全扫权重表。"""
-        self.scanned += len(self.weights)
-        total = 0
-        for weight in self.weights.values():
-            total += weight
-        if total <= 0:
-            return 0.0
-        got = 0
-        for asset_id, count in self.reported.items():
-            got += self.weights.get(asset_id, 1) * count
-        return got / total
+        """当前进度：已完成权重和 / 总权重和；总权重和不为正时进度按 1 处理。"""
+        if self._total <= 0:
+            value = 1.0
+        else:
+            value = self._done / self._total
+        if value < 0.0:
+            value = 0.0
+        elif value > 1.0:
+            value = 1.0
+        if value > self._max_progress:
+            self._max_progress = value
+        return self._max_progress
 
     def scanned_count(self):
         return self.scanned
